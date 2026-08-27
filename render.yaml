@@ -79,8 +79,11 @@ services:
     plan: free
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
-    dockerBuildArgs:
-      NEXT_PUBLIC_API_URL: https://accounting-saas-backend.onrender.com/api/v1
     envVars:
       - key: NODE_ENV
         value: production
+    envVars:
+      - Key: NODE_ENV
+        value: production
+      - Key: NEXT_PUBLIC_API_URL
+        value: https//accounting-saas-backend.onrender.com/api/v1
