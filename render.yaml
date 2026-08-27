@@ -82,7 +82,6 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-    envVars:
       - Key: NODE_ENV
         value: production
       - Key: NEXT_PUBLIC_API_URL
