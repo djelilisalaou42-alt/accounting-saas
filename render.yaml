@@ -1,0 +1,86 @@
+# =====================================================================
+# Render Blueprint — déploiement gratuit (démonstration), 3 services :
+# PostgreSQL + backend (Docker) + frontend (Docker).
+#
+# Usage : pousser ce dépôt sur GitHub, puis sur render.com :
+# New > Blueprint > connecter le dépôt > Render détecte ce fichier
+# automatiquement > "Apply". Voir PRODUCTION_DEPLOYMENT.md, section
+# "Option Render (gratuit, pour démonstration)" pour la procédure
+# complète pas à pas et les limites honnêtes de ce tier gratuit.
+#
+# IMPORTANT — tier gratuit Render, à lire avant de déployer :
+#   - Le service web backend s'endort après 15 min d'inactivité ; la
+#     première requête suivante prend 30-50s (cold start). Normal,
+#     pas un bug.
+#   - La base PostgreSQL gratuite est supprimée après 30 jours —
+#     largement suffisant pour "voir l'application tourner", pas fait
+#     pour une vraie production (voir PRODUCTION_DEPLOYMENT.md pour
+#     les options adaptées à une vraie mise en production).
+#   - Le tier gratuit ne permet PAS d'attacher un disque persistant à
+#     un service web : ATTACHMENTS_STORAGE_PATH ci-dessous pointe vers
+#     un chemin qui est réinitialisé à chaque redémarrage/redéploiement
+#     du conteneur — les pièces jointes uploadées ne survivront PAS à
+#     un redémarrage. Toutes les autres données (écritures, factures,
+#     etc., stockées en PostgreSQL) persistent normalement pendant les
+#     30 jours de la base gratuite.
+# =====================================================================
+
+databases:
+  - name: accounting-saas-db
+    plan: free
+    databaseName: accounting_saas
+    user: accounting_saas
+
+services:
+  - type: web
+    name: accounting-saas-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3001"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: accounting-saas-db
+          property: connectionString
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_ACCESS_EXPIRES_IN
+        value: 15m
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 7d
+      - key: CORS_ORIGIN
+        value: https://accounting-saas-frontend.onrender.com
+      - key: FRONTEND_URL
+        value: https://accounting-saas-frontend.onrender.com
+      - key: API_PREFIX
+        value: api/v1
+      - key: ATTACHMENTS_STORAGE_PATH
+        value: /app/storage/attachments
+      - key: ATTACHMENTS_MAX_SIZE_BYTES
+        value: "10485760"
+      - key: MAX_LOGIN_ATTEMPTS
+        value: "5"
+      - key: LOGIN_LOCKOUT_MINUTES
+        value: "15"
+      - key: SEED_DEMO_DATA
+        value: "true"
+
+  - type: web
+    name: accounting-saas-frontend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    dockerBuildArgs:
+      NEXT_PUBLIC_API_URL: https://accounting-saas-backend.onrender.com/api/v1
+    envVars:
+      - key: NODE_ENV
+        value: production

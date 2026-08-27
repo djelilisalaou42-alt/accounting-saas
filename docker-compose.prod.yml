@@ -1,0 +1,99 @@
+# =====================================================================
+# accounting-saas — orchestration de production (Docker Compose).
+#
+# Distinct de docker-compose.yml (racine du projet), qui ne lance que
+# PostgreSQL + pgAdmin pour le développement local — celui-ci lance
+# l'application complète : PostgreSQL, backend, frontend.
+#
+# Nécessite Docker Compose V2 (`docker compose`, pas l'ancien
+# `docker-compose` en Python) pour le `condition: service_healthy`
+# ci-dessous.
+#
+# Usage :
+#   cp .env.production.example .env.production   # puis renseigner de vraies valeurs
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Le reverse proxy (nginx, voir deploy/nginx.conf.example) reste
+# volontairement HORS de ce fichier — il tourne sur l'hôte (ou dans son
+# propre conteneur séparé) et route vers les ports publiés ci-dessous.
+# =====================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Volume nommé persistant — survit aux redémarrages/recréations
+      # de conteneur. NE JAMAIS utiliser un volume anonyme ici.
+      - postgres_data_prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Jamais exposé publiquement en production — seul le backend, sur
+    # le réseau interne Docker, y accède. Décommenter uniquement pour
+    # un accès de diagnostic ponctuel et temporaire.
+    # ports:
+    #   - "5432:5432"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN:-15m}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-7d}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      FRONTEND_URL: ${FRONTEND_URL}
+      PORT: 3001
+      API_PREFIX: api/v1
+      ATTACHMENTS_STORAGE_PATH: /app/storage/attachments
+      ATTACHMENTS_MAX_SIZE_BYTES: ${ATTACHMENTS_MAX_SIZE_BYTES:-10485760}
+      MAX_LOGIN_ATTEMPTS: ${MAX_LOGIN_ATTEMPTS:-5}
+      LOGIN_LOCKOUT_MINUTES: ${LOGIN_LOCKOUT_MINUTES:-15}
+      # Jamais "true" par défaut — voir docker-entrypoint.sh. À ne
+      # positionner à "true" que pour un environnement de démonstration
+      # explicitement voulu, jamais une vraie production.
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
+    volumes:
+      # Volume nommé persistant pour les pièces jointes — à sauvegarder
+      # avec backend/scripts/backup/backup-attachments.sh (pointer
+      # ATTACHMENTS_STORAGE_PATH de ce script vers le point de montage
+      # réel de ce volume sur l'hôte, voir `docker volume inspect`).
+      - attachments_data_prod:/app/storage/attachments
+    ports:
+      - "127.0.0.1:3001:3001"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Inlinée au build (voir frontend/Dockerfile) — DOIT être
+        # l'URL publique réelle de l'API, jamais localhost, dès que ce
+        # build est destiné à la production.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  postgres_data_prod:
+  attachments_data_prod:

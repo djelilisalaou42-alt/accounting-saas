@@ -1,0 +1,1552 @@
+// =====================================================================
+// Progiciel de gestion comptable et financière - SYSCOHADA / OHADA
+// Schéma Prisma - Étape 2 (version corrigée après revue technique)
+//
+// Corrections apportées suite à la revue (voir REVUE-TECHNIQUE-SCHEMA.md) :
+//  - companyId dénormalisé sur les tables de détail (isolation + perf)
+//  - linkedEntryId transformés en vraies relations vers AccountingEntry
+//  - AccountingPeriod.closedBy -> relation User + champs de réouverture
+//  - Contrepassation : sens de la relation corrigé (reversalOfEntryId)
+//  - onDelete: Restrict généralisé sur les données financières
+//  - Ajout du modèle Lettering (SYSCOHADA)
+//  - Ajout du modèle NumberingSequence (numérotation atomique)
+//  - Ajout de Payment.paymentNumber
+//  - Index composites orientés multi-tenant
+//
+// Les triggers PostgreSQL (équilibre débit/crédit, immuabilité des
+// écritures validées) et la contrainte d'exclusion anti-chevauchement
+// des exercices ne sont pas exprimables en Prisma : ils seront ajoutés
+// en SQL brut dans prisma/migrations/ à l'Étape 3.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// ENUMS
+// =====================================================================
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_INVITATION
+}
+
+enum UserCompanyStatus {
+  ACTIVE
+  DISABLED
+  REMOVED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum CompanyStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum PeriodStatus {
+  OPEN
+  CLOSED
+  LOCKED // clôturé et verrouillé définitivement
+}
+
+// AccountClass n'est plus un enum figé depuis l'Étape 6 : les classes
+// comptables sont désormais des données (modèle AccountClass plus bas),
+// rattachées à un référentiel (AccountingFramework), pour permettre à
+// terme plusieurs référentiels (SYSCOHADA, PCG français...) sans
+// modification de code. Voir REVUE-ETAPE-6.md pour la justification
+// complète de cette migration.
+
+enum AccountCategory {
+  ASSET     // Actif
+  LIABILITY // Passif
+  EQUITY    // Capitaux propres
+  REVENUE   // Produits
+  EXPENSE   // Charges
+  OTHER     // Comptabilité analytique / hors bilan / engagements
+}
+
+enum AccountNature {
+  DEBIT
+  CREDIT
+  BOTH
+}
+
+enum JournalType {
+  SALES
+  PURCHASES
+  CASH
+  BANK
+  GENERAL
+  PAYROLL
+  OPENING
+  CLOSING
+}
+
+enum EntryStatus {
+  DRAFT
+  VALIDATED
+  REVERSED
+}
+
+enum EntryLineSide {
+  DEBIT
+  CREDIT
+}
+
+enum PartnerType {
+  CUSTOMER
+  SUPPLIER
+}
+
+enum DocumentStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REFUSED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentDirection {
+  INCOMING
+  OUTGOING
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CHECK
+  MOBILE_MONEY
+  CARD
+  OTHER
+}
+
+enum CashTransactionType {
+  RECEIPT
+  DISBURSEMENT
+}
+
+enum BankTransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum BankTransactionSource {
+  BOOK
+  STATEMENT
+}
+
+enum ReconciliationStatus {
+  IN_PROGRESS
+  COMPLETED
+  CANCELED
+}
+
+enum FixedAssetStatus {
+  // Fiche créée, immobilisation pas encore mise en service — l'amortissement
+  // ne peut démarrer tant que le statut n'est pas IN_SERVICE (Étape 12).
+  ACQUIRED
+  IN_SERVICE
+  UNDER_MAINTENANCE
+  DISPOSED
+  FULLY_DEPRECIATED
+}
+
+enum DepreciationMethod {
+  STRAIGHT_LINE
+  DECLINING_BALANCE
+}
+
+enum AssetDisposalType {
+  SALE
+  SCRAPPING
+  OTHER
+}
+
+enum TaxDeclarationStatus {
+  DRAFT
+  SUBMITTED
+  PAID
+  LATE
+}
+
+enum TaxType {
+  VAT
+  WITHHOLDING
+  OTHER
+}
+
+enum BudgetStatus {
+  DRAFT
+  ACTIVE
+  CLOSED
+}
+
+enum SequenceDocumentType {
+  ACCOUNTING_ENTRY
+  INVOICE
+  QUOTE
+  PAYMENT
+  CASH_TRANSACTION
+  BANK_TRANSACTION
+  TAX_DECLARATION
+  LETTERING
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  VALIDATE
+  REVERSE
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  EXPORT
+  PERMISSION_CHANGE
+  CLOSE_PERIOD
+  REOPEN_PERIOD
+  SETTINGS_CHANGE
+  LETTERING
+  UNLETTERING
+  REVOKE
+  REGISTER
+  LOGOUT_ALL
+  REFRESH
+  PASSWORD_CHANGE
+  PASSWORD_RESET_REQUEST
+  PASSWORD_RESET
+  COMPANY_CREATE
+  COMPANY_UPDATE
+  MEMBER_INVITE
+  MEMBER_ROLE_CHANGE
+  MEMBER_DISABLE
+  MEMBER_ENABLE
+  MEMBER_REMOVE
+  COMPANY_SWITCH
+  PERMISSION_DENIED
+  ACCOUNT_DISABLE
+  ACCOUNT_ENABLE
+  ACCOUNT_IMPORT
+}
+// =====================================================================
+
+model User {
+  id               String     @id @default(uuid())
+  email            String     @unique
+  passwordHash     String     @map("password_hash")
+  firstName        String     @map("first_name")
+  lastName         String     @map("last_name")
+  phone            String?
+  status           UserStatus @default(PENDING_INVITATION)
+  // Séparé à dessein du système de rôles par entreprise (Role/UserCompany) :
+  // SUPER_ADMIN administre la plateforme dans son ensemble, ce qui n'a pas
+  // de sens comme "rôle au sein d'une entreprise". Ne vaut jamais true par
+  // défaut ni via un endpoint self-service — voir auth.service.ts (register)
+  // et companies.service.ts (aucun des deux ne le positionne).
+  isSuperAdmin     Boolean    @default(false) @map("is_super_admin")
+  failedLoginCount Int        @default(0) @map("failed_login_count")
+  lockedUntil      DateTime?  @map("locked_until")
+  lastLoginAt      DateTime?  @map("last_login_at")
+  lastLoginIp      String?    @map("last_login_ip")
+  createdAt        DateTime   @default(now()) @map("created_at")
+  updatedAt        DateTime   @updatedAt @map("updated_at")
+
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+  userCompanies       UserCompany[]
+  userCompaniesDisabled UserCompany[] @relation("UserCompanyDisabledBy")
+  invitationsSent     CompanyInvitation[] @relation("InvitationInvitedBy")
+  createdEntries      AccountingEntry[]   @relation("EntryCreatedBy")
+  validatedEntries    AccountingEntry[]   @relation("EntryValidatedBy")
+  periodsClosed       AccountingPeriod[]  @relation("PeriodClosedBy")
+  periodsReopened      AccountingPeriod[] @relation("PeriodReopenedBy")
+  letteringsCreated    Lettering[]        @relation("LetteringCreatedBy")
+  letteringsCanceled   Lettering[]        @relation("LetteringCanceledBy")
+  auditLogs            AuditLog[]
+  reconciliationsCreated  BankReconciliation[] @relation("ReconciliationCreatedBy")
+  reconciliationsCanceled BankReconciliation[] @relation("ReconciliationCanceledBy")
+  attachmentsUploaded  Attachment[]
+  assetDisposalsCreated AssetDisposal[]
+  taxDeclarationsCreated TaxDeclaration[] @relation("TaxDeclarationCreatedBy")
+  taxDeclarationsValidated TaxDeclaration[] @relation("TaxDeclarationValidatedBy")
+  budgetsCreatedBy Budget[] @relation("BudgetCreatedBy")
+
+  @@map("users")
+  @@index([email])
+}
+
+model RefreshToken {
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  tokenHash         String    @unique @map("token_hash")
+  expiresAt         DateTime  @map("expires_at")
+  revoked           Boolean   @default(false)
+  revokedAt         DateTime? @map("revoked_at")
+  lastUsedAt        DateTime? @map("last_used_at")
+  // Chaîne de rotation : pointe vers le token qui a remplacé celui-ci.
+  // Sert aussi à la détection de réutilisation (un token révoqué qu'on
+  // tente de réutiliser révèle un vol probable -> révocation de toute
+  // la famille de tokens issus de la même session).
+  replacedByTokenId String?   @unique @map("replaced_by_token_id")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  userAgent         String?   @map("user_agent")
+  ipAddress         String?   @map("ip_address")
+
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacedByToken RefreshToken? @relation("RefreshTokenRotation", fields: [replacedByTokenId], references: [id])
+  replacesToken   RefreshToken? @relation("RefreshTokenRotation")
+
+  @@map("refresh_tokens")
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  ipAddress String?   @map("ip_address")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("password_reset_tokens")
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  companyId   String?  @map("company_id")
+  name        String
+  description String?
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  company         Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  rolePermissions RolePermission[]
+  userCompanies   UserCompany[]
+  invitations     CompanyInvitation[]
+
+  @@map("roles")
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  module      String
+  description String?
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+  @@index([module])
+}
+
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserCompany {
+  id             String            @id @default(uuid())
+  userId         String            @map("user_id")
+  companyId      String            @map("company_id")
+  roleId         String            @map("role_id")
+  isDefault      Boolean           @default(false) @map("is_default")
+  status         UserCompanyStatus @default(ACTIVE)
+  disabledAt     DateTime?         @map("disabled_at")
+  disabledById   String?           @map("disabled_by_id")
+  invitationId   String?           @unique @map("invitation_id") // null si créé directement (ex: créateur de l'entreprise)
+  invitedBy      String?           @map("invited_by") // legacy, conservé pour compatibilité — préférer invitationId.invitedById
+  createdAt      DateTime          @default(now()) @map("created_at")
+
+  user       User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company    Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  role       Role                @relation(fields: [roleId], references: [id])
+  disabledBy User?               @relation("UserCompanyDisabledBy", fields: [disabledById], references: [id])
+  invitation CompanyInvitation?  @relation(fields: [invitationId], references: [id])
+
+  @@map("user_companies")
+  @@unique([userId, companyId])
+  @@index([companyId])
+  @@index([userId])
+  @@index([companyId, status])
+}
+
+model CompanyInvitation {
+  id           String           @id @default(uuid())
+  companyId    String           @map("company_id")
+  email        String
+  roleId       String           @map("role_id")
+  tokenHash    String           @unique @map("token_hash")
+  status       InvitationStatus @default(PENDING)
+  invitedById  String           @map("invited_by_id")
+  expiresAt    DateTime         @map("expires_at")
+  acceptedAt   DateTime?        @map("accepted_at")
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  company     Company      @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  role        Role         @relation(fields: [roleId], references: [id])
+  invitedBy   User         @relation("InvitationInvitedBy", fields: [invitedById], references: [id])
+  userCompany UserCompany?
+
+  @@map("company_invitations")
+  @@index([companyId])
+  @@index([email])
+  @@index([tokenHash])
+}
+
+// =====================================================================
+// ENTREPRISES (TENANTS)
+// =====================================================================
+
+model Company {
+  id                   String        @id @default(uuid())
+  name                 String
+  legalName            String?       @map("legal_name")
+  registrationNumber   String?       @map("registration_number")
+  taxIdNumber          String?       @map("tax_id_number")
+  country              String
+  // Référentiel comptable utilisé par l'entreprise — INDÉPENDANT du
+  // pays (ex: plusieurs pays OHADA partagent SYSCOHADA). Assigné à la
+  // création de l'entreprise (SYSCOHADA par défaut), modifiable
+  // uniquement si aucun compte n'a encore été créé (règle applicative,
+  // voir accounting-periods/accounts.service.ts).
+  accountingFrameworkId String?      @map("accounting_framework_id")
+  currency             String        @default("XOF")
+  address              String?
+  city                 String?
+  phone                String?
+  email                String?
+  logoUrl              String?       @map("logo_url")
+  fiscalYearStartMonth Int           @default(1) @map("fiscal_year_start_month")
+  status               CompanyStatus @default(ACTIVE)
+  createdAt            DateTime      @default(now()) @map("created_at")
+  updatedAt            DateTime      @updatedAt @map("updated_at")
+
+  userCompanies      UserCompany[]
+  accountingFramework AccountingFramework? @relation(fields: [accountingFrameworkId], references: [id], onDelete: Restrict)
+  invitations        CompanyInvitation[]
+  roles              Role[]
+  accountingPeriods  AccountingPeriod[]
+  accounts           Account[]
+  journals           Journal[]
+  accountingEntries  AccountingEntry[]
+  letterings         Lettering[]
+  customers          Customer[]
+  suppliers          Supplier[]
+  quotes             Quote[]
+  invoices           Invoice[]
+  payments           Payment[]
+  cashAccounts       CashAccount[]
+  bankAccounts       BankAccount[]
+  fixedAssets        FixedAsset[]
+  assetCategories    AssetCategory[]
+  assetDisposals     AssetDisposal[]
+  taxDeclarations    TaxDeclaration[]
+  companyTaxSettings CompanyTaxSettings[]
+  budgets            Budget[]
+  attachments        Attachment[]
+  numberingSequences NumberingSequence[]
+  auditLogs          AuditLog[]
+
+  @@map("companies")
+  @@index([country])
+}
+
+// =====================================================================
+// EXERCICES COMPTABLES
+// =====================================================================
+
+model AccountingPeriod {
+  id           String       @id @default(uuid())
+  companyId    String       @map("company_id")
+  name         String
+  startDate    DateTime     @map("start_date")
+  endDate      DateTime     @map("end_date")
+  status       PeriodStatus @default(OPEN)
+  closedAt     DateTime?    @map("closed_at")
+  closedById   String?      @map("closed_by_id")
+  reopenedAt   DateTime?    @map("reopened_at")
+  reopenedById String?      @map("reopened_by_id")
+  reopenReason String?      @map("reopen_reason")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  company           Company           @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  closedBy          User?             @relation("PeriodClosedBy", fields: [closedById], references: [id])
+  reopenedBy        User?             @relation("PeriodReopenedBy", fields: [reopenedById], references: [id])
+  accountingEntries AccountingEntry[]
+  budgets           Budget[]
+
+  @@map("accounting_periods")
+  @@unique([companyId, name])
+  @@index([companyId])
+  // NB : une contrainte d'exclusion PostgreSQL (EXCLUDE, extension btree_gist)
+  // interdisant deux périodes aux dates chevauchantes pour la même entreprise
+  // sera ajoutée en SQL brut dans la migration (non exprimable en Prisma).
+}
+
+// =====================================================================
+// PLAN COMPTABLE
+// =====================================================================
+
+// =====================================================================
+// RÉFÉRENTIEL COMPTABLE (Étape 6)
+//
+// AccountingFramework (ex: SYSCOHADA Révisé, PCG français) est
+// indépendant du pays : plusieurs pays OHADA partagent le même
+// référentiel SYSCOHADA. Chaque Company choisit UN référentiel
+// (Company.accountingFrameworkId) ; chaque Account appartient à une
+// classe (AccountClass), elle-même rattachée à un référentiel — le
+// référentiel de chaque compte est donc TOUJOURS dérivé de sa classe,
+// jamais choisi indépendamment (garanti par trigger, voir migration).
+// =====================================================================
+
+model AccountingFramework {
+  id          String   @id @default(uuid())
+  code        String   @unique // ex: "SYSCOHADA_REVISED", "PCG_FR"
+  name        String
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  accountClasses AccountClass[]
+  companies      Company[]
+  accounts       Account[]
+
+  @@map("accounting_frameworks")
+}
+
+model AccountClass {
+  id           String          @id @default(uuid())
+  frameworkId  String          @map("framework_id")
+  code         String          // "1".."9" — jamais supposé numérique à un chiffre par le code applicatif
+  name         String
+  description  String?
+  nature       AccountNature   @default(BOTH)
+  category     AccountCategory @default(OTHER)
+  displayOrder Int             @default(0) @map("display_order")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  framework AccountingFramework @relation(fields: [frameworkId], references: [id], onDelete: Restrict)
+  accounts  Account[]
+
+  @@map("account_classes")
+  @@unique([frameworkId, code])
+  @@index([frameworkId])
+}
+
+model Account {
+  id             String        @id @default(uuid())
+  companyId      String        @map("company_id")
+  // Dénormalisé depuis accountClass.frameworkId — imposé par trigger
+  // (jamais choisi indépendamment de la classe, voir migration).
+  frameworkId    String        @map("framework_id")
+  accountClassId String        @map("account_class_id")
+  code           String
+  label          String
+  nature         AccountNature @default(BOTH)
+  parentId       String?       @map("parent_id")
+  // Profondeur dans la hiérarchie (1 = classe elle-même, 2 = "40",
+  // 3 = "401", ...). Recalculée par le service à la création/import,
+  // jamais déduite de la LONGUEUR du code (un plan comptable peut
+  // avoir des niveaux de détail différents selon les comptes — voir
+  // REVUE-ETAPE-6.md, règle de numérotation).
+  level          Int           @default(1)
+  // Compte de mouvement (accepte des écritures) vs compte de
+  // regroupement/catégorie (agrégateur uniquement, ex: classe "40").
+  isPostable     Boolean       @default(true) @map("is_postable")
+  isAuxiliary    Boolean       @default(false) @map("is_auxiliary")
+  isActive       Boolean       @default(true) @map("is_active")
+  description    String?
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  company      Company               @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  framework    AccountingFramework   @relation(fields: [frameworkId], references: [id], onDelete: Restrict)
+  accountClass AccountClass          @relation(fields: [accountClassId], references: [id], onDelete: Restrict)
+  parent       Account?              @relation("AccountHierarchy", fields: [parentId], references: [id])
+  children     Account[]             @relation("AccountHierarchy")
+  entryLines   AccountingEntryLine[]
+  letterings   Lettering[]
+  budgetLines  BudgetLine[]
+  fixedAssets  FixedAsset[]          @relation("AssetAccount")
+  fixedAssetsAsDepreciationAccount FixedAsset[] @relation("AssetDepreciationAccount")
+  fixedAssetsAsDepreciationExpenseAccount FixedAsset[] @relation("AssetDepreciationExpenseAccount")
+  assetCategoriesAsAssetAccount AssetCategory[] @relation("AssetCategoryAssetAccount")
+  assetCategoriesAsDepreciationAccount AssetCategory[] @relation("AssetCategoryDepreciationAccount")
+  assetCategoriesAsDepreciationExpenseAccount AssetCategory[] @relation("AssetCategoryDepreciationExpenseAccount")
+  cashAccounts CashAccount[]
+  bankAccounts BankAccount[]
+  customers    Customer[]
+  suppliers    Supplier[]
+  invoiceItems InvoiceItem[]
+  invoicesAsTaxAccount Invoice[] @relation("InvoiceTaxAccount")
+  taxSettingsAsCollected  CompanyTaxSettings[] @relation("TaxCollectedAccount")
+  taxSettingsAsDeductible CompanyTaxSettings[] @relation("TaxDeductibleAccount")
+  taxSettingsAsPayable    CompanyTaxSettings[] @relation("TaxPayableAccount")
+
+  @@map("accounts")
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@index([companyId, accountClassId])
+  @@index([parentId])
+  @@index([frameworkId])
+}
+
+// =====================================================================
+// JOURNAUX
+// =====================================================================
+
+model Journal {
+  id        String      @id @default(uuid())
+  companyId String      @map("company_id")
+  code      String
+  label     String
+  type      JournalType
+  isActive  Boolean     @default(true) @map("is_active")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  company Company           @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  entries AccountingEntry[]
+
+  @@map("journals")
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+// =====================================================================
+// ÉCRITURES COMPTABLES
+// =====================================================================
+
+model AccountingEntry {
+  id     String   @id @default(uuid())
+  companyId String @map("company_id")
+  periodId  String @map("period_id")
+  journalId String @map("journal_id")
+
+  entryNumber String      @map("entry_number")
+  entryDate   DateTime    @map("entry_date")
+  label       String
+  reference   String?
+  status      EntryStatus @default(DRAFT)
+  totalDebit  Decimal     @default(0) @map("total_debit") @db.Decimal(18, 2)
+  totalCredit Decimal     @default(0) @map("total_credit") @db.Decimal(18, 2)
+
+  createdById   String    @map("created_by_id")
+  validatedById String?   @map("validated_by_id")
+  validatedAt   DateTime? @map("validated_at")
+
+  // Contrepassation : ce champ n'est renseigné QUE sur l'écriture DE
+  // CONTREPASSATION elle-même, et pointe vers l'écriture D'ORIGINE qu'elle
+  // annule. Lecture naturelle : entry.reversalOfEntry = écriture d'origine ;
+  // originalEntry.reversedByEntry = écriture qui l'a contrepassée (ou null).
+  reversalOfEntryId String? @unique @map("reversal_of_entry_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  company         Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  period          AccountingPeriod @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  journal         Journal          @relation(fields: [journalId], references: [id], onDelete: Restrict)
+  createdBy       User             @relation("EntryCreatedBy", fields: [createdById], references: [id])
+  validatedBy     User?            @relation("EntryValidatedBy", fields: [validatedById], references: [id])
+  reversalOfEntry AccountingEntry? @relation("EntryReversal", fields: [reversalOfEntryId], references: [id])
+  reversedByEntry AccountingEntry? @relation("EntryReversal")
+
+  lines       AccountingEntryLine[]
+  attachments Attachment[]
+
+  // Documents source ayant généré cette écriture (une écriture peut être
+  // référencée par plusieurs documents : facture + son règlement, par ex.)
+  generatedInvoices           Invoice[]
+  generatedPayments           Payment[]
+  generatedCashTransactions   CashTransaction[]
+  generatedBankTransactions   BankTransaction[]
+  generatedDepreciationEntries DepreciationEntry[] @relation("DepreciationLinkedEntry")
+  generatedFixedAssetAcquisitions FixedAsset[] @relation("AssetAcquisitionEntry")
+  generatedAssetDisposals     AssetDisposal[] @relation("AssetDisposalEntry")
+  generatedTaxDeclarations    TaxDeclaration[] @relation("TaxDeclarationEntry")
+
+  @@map("accounting_entries")
+  @@unique([companyId, journalId, entryNumber])
+  @@index([companyId, periodId])
+  @@index([companyId, status])
+  @@index([companyId, entryDate])
+}
+
+model AccountingEntryLine {
+  id        String @id @default(uuid())
+  entryId   String @map("entry_id")
+  accountId String @map("account_id")
+  // Dénormalisé depuis AccountingEntry.companyId — synchronisé par le
+  // service dans la même transaction que la création de la ligne.
+  // Sert de filet de sécurité multi-tenant et évite une jointure sur
+  // les requêtes de grand livre / recherche par compte.
+  companyId String @map("company_id")
+
+  lineNumber  Int
+  side        EntryLineSide
+  amount      Decimal       @db.Decimal(18, 2)
+  label       String?
+  partnerType PartnerType?  @map("partner_type")
+  partnerId   String?       @map("partner_id")
+  letteringId String?       @map("lettering_id")
+  createdAt   DateTime      @default(now()) @map("created_at")
+
+  entry      AccountingEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  account    Account         @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  lettering  Lettering?      @relation(fields: [letteringId], references: [id], onDelete: SetNull)
+
+  @@map("accounting_entry_lines")
+  @@index([entryId])
+  @@index([accountId])
+  @@index([companyId, accountId])
+  @@index([partnerType, partnerId])
+  @@index([letteringId])
+}
+
+// =====================================================================
+// LETTRAGE (rapprochement des lignes d'un compte auxiliaire)
+// =====================================================================
+
+model Lettering {
+  id           String    @id @default(uuid())
+  companyId    String    @map("company_id")
+  accountId    String    @map("account_id") // compte auxiliaire lettré (401x / 411x)
+  code         String    // code de lettrage (ex: "A", "AA"...)
+  isBalanced   Boolean   @default(false) @map("is_balanced") // somme des lignes = 0
+  createdById  String    @map("created_by_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  canceledAt   DateTime? @map("canceled_at") // délettrage
+  canceledById String?   @map("canceled_by_id")
+
+  company    Company               @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  account    Account               @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  createdBy  User                  @relation("LetteringCreatedBy", fields: [createdById], references: [id])
+  canceledBy User?                 @relation("LetteringCanceledBy", fields: [canceledById], references: [id])
+  lines      AccountingEntryLine[]
+
+  @@map("letterings")
+  @@unique([companyId, accountId, code])
+  @@index([companyId])
+}
+
+// =====================================================================
+// NUMÉROTATION SÉQUENTIELLE (atomique, multi-utilisateur)
+// =====================================================================
+
+model NumberingSequence {
+  id           String               @id @default(uuid())
+  companyId    String               @map("company_id")
+  documentType SequenceDocumentType @map("document_type")
+  // Portée additionnelle si le compteur doit être scindé (ex: par journal
+  // pour les écritures, par année pour les factures) — "" si non applicable.
+  scopeKey     String               @default("") @map("scope_key")
+  prefix       String?
+  currentValue Int                  @default(0) @map("current_value")
+  padding      Int                  @default(6)
+  updatedAt    DateTime             @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+
+  @@map("numbering_sequences")
+  @@unique([companyId, documentType, scopeKey])
+}
+
+// =====================================================================
+// CLIENTS / FOURNISSEURS
+// =====================================================================
+
+model Customer {
+  id              String   @id @default(uuid())
+  companyId       String   @map("company_id")
+  code            String
+  name            String
+  taxIdNumber     String?  @map("tax_id_number")
+  email           String?
+  phone           String?
+  address         String?
+  city            String?
+  country         String?
+  accountId       String?  @map("account_id")
+  paymentTermDays Int      @default(30) @map("payment_term_days")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  company  Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  account  Account?  @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  quotes   Quote[]
+  invoices Invoice[]
+  payments Payment[]
+
+  @@map("customers")
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@index([companyId, name])
+}
+
+model Supplier {
+  id              String   @id @default(uuid())
+  companyId       String   @map("company_id")
+  code            String
+  name            String
+  taxIdNumber     String?  @map("tax_id_number")
+  email           String?
+  phone           String?
+  address         String?
+  city            String?
+  country         String?
+  accountId       String?  @map("account_id")
+  paymentTermDays Int      @default(30) @map("payment_term_days")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  company     Company      @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  account     Account?     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  invoices    Invoice[]
+  payments    Payment[]
+  fixedAssets FixedAsset[]
+
+  @@map("suppliers")
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@index([companyId, name])
+}
+
+// =====================================================================
+// DEVIS
+// =====================================================================
+
+model Quote {
+  id          String         @id @default(uuid())
+  companyId   String         @map("company_id")
+  customerId  String         @map("customer_id")
+  quoteNumber String         @map("quote_number")
+  issueDate   DateTime       @map("issue_date")
+  expiryDate  DateTime?      @map("expiry_date")
+  status      DocumentStatus @default(DRAFT)
+  currency    String         @default("XOF")
+  subtotal    Decimal        @default(0) @db.Decimal(18, 2)
+  taxTotal    Decimal        @default(0) @map("tax_total") @db.Decimal(18, 2)
+  total       Decimal        @default(0) @db.Decimal(18, 2)
+  notes       String?
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  company  Company     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  customer Customer    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  items    QuoteItem[]
+  invoice  Invoice?
+
+  @@map("quotes")
+  @@unique([companyId, quoteNumber])
+  @@index([companyId])
+  @@index([customerId])
+}
+
+model QuoteItem {
+  id          String  @id @default(uuid())
+  quoteId     String  @map("quote_id")
+  companyId   String  @map("company_id") // dénormalisé depuis Quote.companyId
+  description String
+  quantity    Decimal @db.Decimal(18, 2)
+  unitPrice   Decimal @map("unit_price") @db.Decimal(18, 2)
+  taxRate     Decimal @default(0) @map("tax_rate") @db.Decimal(5, 2)
+  lineTotal   Decimal @map("line_total") @db.Decimal(18, 2)
+
+  quote Quote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@map("quote_items")
+  @@index([quoteId])
+  @@index([companyId])
+}
+
+// =====================================================================
+// FACTURATION
+// =====================================================================
+
+model Invoice {
+  id            String         @id @default(uuid())
+  companyId     String         @map("company_id")
+  customerId    String?        @map("customer_id")
+  supplierId    String?        @map("supplier_id")
+  quoteId       String?        @unique @map("quote_id")
+  invoiceNumber String         @map("invoice_number")
+  invoiceType   String         @default("SALE") @map("invoice_type") // SALE | PURCHASE
+  issueDate     DateTime       @map("issue_date")
+  dueDate       DateTime       @map("due_date")
+  status        DocumentStatus @default(DRAFT)
+  currency      String         @default("XOF")
+  subtotal      Decimal        @default(0) @db.Decimal(18, 2)
+  taxTotal      Decimal        @default(0) @map("tax_total") @db.Decimal(18, 2)
+  total         Decimal        @default(0) @db.Decimal(18, 2)
+  amountPaid    Decimal        @default(0) @map("amount_paid") @db.Decimal(18, 2)
+  notes         String?
+  linkedEntryId String?        @map("linked_entry_id") // écriture comptable génératrice
+  // Compte de TVA collectée (vente) ou récupérable (achat) pour
+  // l'ensemble de la facture — jamais un numéro codé en dur.
+  taxAccountId  String?        @map("tax_account_id")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  company     Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  customer    Customer?        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  supplier    Supplier?        @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  quote       Quote?           @relation(fields: [quoteId], references: [id])
+  linkedEntry AccountingEntry? @relation(fields: [linkedEntryId], references: [id], onDelete: Restrict)
+  taxAccount  Account?         @relation("InvoiceTaxAccount", fields: [taxAccountId], references: [id], onDelete: Restrict)
+  items       InvoiceItem[]
+  payments    Payment[]
+  allocations PaymentAllocation[]
+  attachments Attachment[]
+  fixedAssets FixedAsset[]
+
+  @@map("invoices")
+  @@unique([companyId, invoiceNumber])
+  @@index([companyId])
+  @@index([customerId])
+  @@index([supplierId])
+  @@index([companyId, status])
+  @@index([companyId, dueDate])
+}
+
+model InvoiceItem {
+  id          String  @id @default(uuid())
+  invoiceId   String  @map("invoice_id")
+  companyId   String  @map("company_id") // dénormalisé depuis Invoice.companyId
+  description String
+  quantity    Decimal @db.Decimal(18, 2)
+  unitPrice   Decimal @map("unit_price") @db.Decimal(18, 2)
+  taxRate     Decimal @default(0) @map("tax_rate") @db.Decimal(5, 2)
+  lineTotal   Decimal @map("line_total") @db.Decimal(18, 2)
+  // Compte de produit (vente) ou de charge (achat) pour cette ligne —
+  // choisi par l'utilisateur dans le référentiel comptable réel,
+  // jamais un numéro codé en dur (Étape 10, Phase 7/8).
+  accountId   String? @map("account_id")
+
+  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  account Account? @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@map("invoice_items")
+  @@index([invoiceId])
+  @@index([companyId])
+}
+
+// =====================================================================
+// PAIEMENTS
+// =====================================================================
+
+model Payment {
+  id            String           @id @default(uuid())
+  companyId     String           @map("company_id")
+  paymentNumber String           @map("payment_number")
+  invoiceId     String?          @map("invoice_id")
+  customerId    String?          @map("customer_id")
+  supplierId    String?          @map("supplier_id")
+  direction     PaymentDirection
+  method        PaymentMethod
+  amount        Decimal          @db.Decimal(18, 2)
+  paymentDate   DateTime         @map("payment_date")
+  reference     String?
+  cashAccountId String?          @map("cash_account_id")
+  bankAccountId String?          @map("bank_account_id")
+  linkedEntryId String?          @map("linked_entry_id")
+  notes         String?
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+
+  company     Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  invoice     Invoice?         @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  customer    Customer?        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  supplier    Supplier?        @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  cashAccount CashAccount?     @relation(fields: [cashAccountId], references: [id], onDelete: Restrict)
+  bankAccount BankAccount?     @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  linkedEntry AccountingEntry? @relation(fields: [linkedEntryId], references: [id], onDelete: Restrict)
+  allocations PaymentAllocation[]
+
+  @@map("payments")
+  @@unique([companyId, paymentNumber])
+  @@index([companyId])
+  @@index([invoiceId])
+  @@index([companyId, paymentDate])
+}
+
+// =====================================================================
+// AFFECTATION DES PAIEMENTS (Étape 10)
+//
+// Un paiement peut être réparti sur plusieurs factures (et une facture
+// peut recevoir des paiements partiels successifs). `Payment.invoiceId`
+// reste renseigné pour le cas simple (1 paiement = 1 facture) mais la
+// source de vérité pour le calcul du solde d'une facture est TOUJOURS
+// la somme des `PaymentAllocation` qui la concernent — jamais
+// `Payment.amount` seul, qui peut être réparti.
+// =====================================================================
+
+model PaymentAllocation {
+  id        String   @id @default(uuid())
+  paymentId String   @map("payment_id")
+  invoiceId String   @map("invoice_id")
+  companyId String   @map("company_id") // dénormalisé depuis Payment.companyId
+  amount    Decimal  @db.Decimal(18, 2)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@map("payment_allocations")
+  @@unique([paymentId, invoiceId])
+  @@index([paymentId])
+  @@index([invoiceId])
+  @@index([companyId])
+}
+
+// =====================================================================
+// CAISSE
+// =====================================================================
+
+model CashAccount {
+  id             String   @id @default(uuid())
+  companyId      String   @map("company_id")
+  accountId      String   @map("account_id")
+  code           String
+  name           String
+  currency       String   @default("XOF")
+  currentBalance Decimal  @default(0) @map("current_balance") @db.Decimal(18, 2)
+  isActive       Boolean  @default(true) @map("is_active")
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  company      Company           @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  account      Account           @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  transactions CashTransaction[]
+  payments     Payment[]
+
+  @@map("cash_accounts")
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+model CashTransaction {
+  id              String              @id @default(uuid())
+  cashAccountId   String              @map("cash_account_id")
+  companyId       String              @map("company_id") // dénormalisé depuis CashAccount.companyId
+  type            CashTransactionType
+  amount          Decimal             @db.Decimal(18, 2)
+  transactionDate DateTime            @map("transaction_date")
+  label           String
+  reference       String?
+  linkedEntryId   String?             @map("linked_entry_id")
+  createdAt       DateTime            @default(now()) @map("created_at")
+
+  cashAccount CashAccount      @relation(fields: [cashAccountId], references: [id], onDelete: Restrict)
+  linkedEntry AccountingEntry? @relation(fields: [linkedEntryId], references: [id], onDelete: Restrict)
+
+  @@map("cash_transactions")
+  @@index([cashAccountId])
+  @@index([companyId, transactionDate])
+}
+
+// =====================================================================
+// BANQUE
+// =====================================================================
+
+model BankAccount {
+  id             String   @id @default(uuid())
+  companyId      String   @map("company_id")
+  accountId      String   @map("account_id")
+  code           String
+  name           String
+  bankName       String   @map("bank_name")
+  iban           String?
+  accountNumber  String?  @map("account_number")
+  swiftBic       String?  @map("swift_bic")
+  currency       String   @default("XOF")
+  currentBalance Decimal  @default(0) @map("current_balance") @db.Decimal(18, 2)
+  isActive       Boolean  @default(true) @map("is_active")
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  company         Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  account         Account              @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  transactions    BankTransaction[]
+  reconciliations BankReconciliation[]
+  payments        Payment[]
+
+  @@map("bank_accounts")
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+model BankTransaction {
+  id               String                 @id @default(uuid())
+  bankAccountId    String                 @map("bank_account_id")
+  companyId        String                 @map("company_id") // dénormalisé depuis BankAccount.companyId
+  type             BankTransactionType
+  source           BankTransactionSource  @default(BOOK)
+  amount           Decimal                @db.Decimal(18, 2)
+  transactionDate  DateTime               @map("transaction_date")
+  label            String
+  reference        String?
+  isReconciled     Boolean                @default(false) @map("is_reconciled")
+  reconciliationId String?                @map("reconciliation_id")
+  linkedEntryId    String?                @map("linked_entry_id")
+  createdAt        DateTime               @default(now()) @map("created_at")
+
+  bankAccount    BankAccount         @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  reconciliation BankReconciliation? @relation(fields: [reconciliationId], references: [id])
+  linkedEntry    AccountingEntry?    @relation(fields: [linkedEntryId], references: [id], onDelete: Restrict)
+  matchesAsStatement BankReconciliationMatch[] @relation("StatementTransaction")
+  matchesAsBook      BankReconciliationMatch[] @relation("BookTransaction")
+
+  @@map("bank_transactions")
+  @@index([bankAccountId])
+  @@index([reconciliationId])
+  @@index([companyId, transactionDate])
+  @@index([bankAccountId, source])
+}
+
+model BankReconciliation {
+  id               String               @id @default(uuid())
+  bankAccountId    String               @map("bank_account_id")
+  companyId        String               @map("company_id") // dénormalisé depuis BankAccount.companyId
+  periodStart      DateTime             @map("period_start")
+  periodEnd        DateTime             @map("period_end")
+  statementBalance Decimal              @map("statement_balance") @db.Decimal(18, 2)
+  bookBalance      Decimal              @map("book_balance") @db.Decimal(18, 2)
+  status           ReconciliationStatus @default(IN_PROGRESS)
+  createdById      String?              @map("created_by_id")
+  completedAt      DateTime?            @map("completed_at")
+  canceledAt       DateTime?            @map("canceled_at")
+  canceledById     String?              @map("canceled_by_id")
+  createdAt        DateTime             @default(now()) @map("created_at")
+
+  bankAccount  BankAccount               @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  createdBy    User?                     @relation("ReconciliationCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  canceledBy   User?                     @relation("ReconciliationCanceledBy", fields: [canceledById], references: [id], onDelete: Restrict)
+  transactions BankTransaction[]
+  matches      BankReconciliationMatch[]
+
+  @@map("bank_reconciliations")
+  @@index([bankAccountId])
+  @@index([companyId])
+}
+
+// =====================================================================
+// Pointage ligne à ligne (Étape 11) — table de jonction permettant de
+// rapprocher une ou plusieurs lignes de relevé bancaire (BankTransaction
+// source=STATEMENT) avec un ou plusieurs mouvements du livre
+// (source=BOOK), au sein d'une session BankReconciliation. Ne modifie
+// jamais les BankTransaction/AccountingEntry sous-jacents — le
+// rapprochement est une information complémentaire, jamais une
+// altération de l'écriture comptable validée.
+// =====================================================================
+
+model BankReconciliationMatch {
+  id                      String   @id @default(uuid())
+  reconciliationId        String   @map("reconciliation_id")
+  companyId               String   @map("company_id") // dénormalisé
+  statementTransactionId  String   @map("statement_transaction_id")
+  bookTransactionId       String   @map("book_transaction_id")
+  createdAt               DateTime @default(now()) @map("created_at")
+
+  reconciliation        BankReconciliation @relation(fields: [reconciliationId], references: [id], onDelete: Cascade)
+  statementTransaction   BankTransaction    @relation("StatementTransaction", fields: [statementTransactionId], references: [id], onDelete: Restrict)
+  bookTransaction        BankTransaction    @relation("BookTransaction", fields: [bookTransactionId], references: [id], onDelete: Restrict)
+
+  @@map("bank_reconciliation_matches")
+  @@unique([statementTransactionId, bookTransactionId])
+  @@index([reconciliationId])
+  @@index([companyId])
+  @@index([statementTransactionId])
+  @@index([bookTransactionId])
+}
+
+// =====================================================================
+// IMMOBILISATIONS (Étapes 2 + 12)
+// =====================================================================
+
+// Référentiel de comptes et de méthode/durée par défaut pour une famille
+// d'immobilisations — absent du schéma initial, ajouté Étape 12 pour ne
+// jamais coder un numéro de compte en dur (même principe que
+// AccountingFramework/AccountClass pour le plan comptable).
+model AssetCategory {
+  id                           String             @id @default(uuid())
+  companyId                    String             @map("company_id")
+  code                         String
+  name                         String
+  assetAccountId               String             @map("asset_account_id")
+  depreciationAccountId        String             @map("depreciation_account_id")
+  depreciationExpenseAccountId String             @map("depreciation_expense_account_id")
+  defaultMethod                DepreciationMethod @default(STRAIGHT_LINE) @map("default_method")
+  defaultUsefulLifeYears       Int                @map("default_useful_life_years")
+  isActive                     Boolean            @default(true) @map("is_active")
+  createdAt                    DateTime           @default(now()) @map("created_at")
+  updatedAt                    DateTime           @updatedAt @map("updated_at")
+
+  company                    Company    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  assetAccount               Account    @relation("AssetCategoryAssetAccount", fields: [assetAccountId], references: [id], onDelete: Restrict)
+  depreciationAccount        Account    @relation("AssetCategoryDepreciationAccount", fields: [depreciationAccountId], references: [id], onDelete: Restrict)
+  depreciationExpenseAccount Account    @relation("AssetCategoryDepreciationExpenseAccount", fields: [depreciationExpenseAccountId], references: [id], onDelete: Restrict)
+  fixedAssets                FixedAsset[]
+
+  @@map("asset_categories")
+  @@unique([companyId, code])
+  @@index([companyId])
+}
+
+model FixedAsset {
+  id                           String             @id @default(uuid())
+  companyId                    String             @map("company_id")
+  assetAccountId               String             @map("asset_account_id")
+  categoryId                   String?            @map("category_id")
+  // Comptes de dotation — hérités de la catégorie si non fournis, mais
+  // toujours dénormalisés sur la fiche pour permettre une correction
+  // ponctuelle sans dépendre d'une modification ultérieure de la
+  // catégorie (même principe que Invoice.taxAccountId).
+  depreciationAccountId        String?            @map("depreciation_account_id")
+  depreciationExpenseAccountId String?            @map("depreciation_expense_account_id")
+  supplierId                   String?            @map("supplier_id")
+  // Facture d'origine — si renseignée, l'écriture d'acquisition a déjà
+  // été comptabilisée par le module invoices (Étape 10) et ne doit
+  // jamais être générée une seconde fois par ce module.
+  invoiceId                    String?            @map("invoice_id")
+  acquisitionEntryId           String?            @map("acquisition_entry_id")
+  code                         String
+  label                        String
+  location                     String?
+  reference                    String?
+  notes                        String?
+  acquisitionDate               DateTime           @map("acquisition_date")
+  // Date de mise en service — distincte de la date d'acquisition : le
+  // plan d'amortissement s'ancre exclusivement sur cette date, jamais
+  // sur acquisitionDate (règle explicite du cahier des charges).
+  serviceDate                   DateTime?          @map("service_date")
+  acquisitionCost               Decimal            @map("acquisition_cost") @db.Decimal(18, 2)
+  residualValue                 Decimal            @default(0) @map("residual_value") @db.Decimal(18, 2)
+  usefulLifeYears                Int                @map("useful_life_years")
+  depreciationMethod             DepreciationMethod @default(STRAIGHT_LINE) @map("depreciation_method")
+  status                          FixedAssetStatus   @default(ACQUIRED)
+  disposalDate                    DateTime?          @map("disposal_date")
+  disposalValue                   Decimal?           @map("disposal_value") @db.Decimal(18, 2)
+  createdAt                       DateTime           @default(now()) @map("created_at")
+  updatedAt                       DateTime           @updatedAt @map("updated_at")
+
+  company                    Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  assetAccount               Account             @relation("AssetAccount", fields: [assetAccountId], references: [id], onDelete: Restrict)
+  category                   AssetCategory?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  depreciationAccount        Account?            @relation("AssetDepreciationAccount", fields: [depreciationAccountId], references: [id], onDelete: Restrict)
+  depreciationExpenseAccount Account?            @relation("AssetDepreciationExpenseAccount", fields: [depreciationExpenseAccountId], references: [id], onDelete: Restrict)
+  supplier                   Supplier?           @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  invoice                    Invoice?            @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  acquisitionEntry           AccountingEntry?    @relation("AssetAcquisitionEntry", fields: [acquisitionEntryId], references: [id], onDelete: Restrict)
+  depreciationEntries        DepreciationEntry[]
+  disposal                   AssetDisposal?
+  attachments                Attachment[]
+
+  @@map("fixed_assets")
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@index([categoryId])
+}
+
+model DepreciationEntry {
+  id            String   @id @default(uuid())
+  fixedAssetId  String   @map("fixed_asset_id")
+  companyId     String   @map("company_id") // dénormalisé depuis FixedAsset.companyId
+  fiscalYear    Int      @map("fiscal_year")
+  periodDate    DateTime @map("period_date")
+  amount        Decimal  @db.Decimal(18, 2)
+  accumulated   Decimal  @db.Decimal(18, 2)
+  netBookValue  Decimal  @map("net_book_value") @db.Decimal(18, 2)
+  linkedEntryId String?  @map("linked_entry_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  fixedAsset  FixedAsset       @relation(fields: [fixedAssetId], references: [id], onDelete: Restrict)
+  linkedEntry AccountingEntry? @relation("DepreciationLinkedEntry", fields: [linkedEntryId], references: [id], onDelete: Restrict)
+
+  @@map("depreciation_entries")
+  @@unique([fixedAssetId, fiscalYear])
+  @@index([fixedAssetId])
+  @@index([companyId])
+}
+
+// Trace structurée d'une cession/sortie d'immobilisation — la contrainte
+// unique sur fixedAssetId protège nativement contre une double cession,
+// y compris sous concurrence (contrainte d'unicité PostgreSQL, jamais
+// contournable par une simple validation applicative).
+model AssetDisposal {
+  id                     String             @id @default(uuid())
+  companyId              String             @map("company_id")
+  fixedAssetId           String             @unique @map("fixed_asset_id")
+  disposalDate           DateTime           @map("disposal_date")
+  disposalType           AssetDisposalType  @map("disposal_type")
+  grossValue             Decimal            @map("gross_value") @db.Decimal(18, 2)
+  accumulatedDepreciation Decimal           @map("accumulated_depreciation") @db.Decimal(18, 2)
+  netBookValue           Decimal            @map("net_book_value") @db.Decimal(18, 2)
+  disposalPrice          Decimal            @default(0) @map("disposal_price") @db.Decimal(18, 2)
+  result                 Decimal            @db.Decimal(18, 2)
+  linkedEntryId          String?            @map("linked_entry_id")
+  createdById            String             @map("created_by_id")
+  createdAt              DateTime           @default(now()) @map("created_at")
+
+  company     Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  fixedAsset  FixedAsset       @relation(fields: [fixedAssetId], references: [id], onDelete: Restrict)
+  linkedEntry AccountingEntry? @relation("AssetDisposalEntry", fields: [linkedEntryId], references: [id], onDelete: Restrict)
+  createdBy   User             @relation(fields: [createdById], references: [id])
+
+  @@map("asset_disposals")
+  @@index([companyId])
+}
+
+// =====================================================================
+// FISCALITÉ (configurable, non codée en dur)
+// =====================================================================
+
+model Tax {
+  id        String    @id @default(uuid())
+  country   String
+  code      String
+  label     String
+  type      TaxType   @default(VAT)
+  rate      Decimal   @db.Decimal(5, 2)
+  startDate DateTime  @map("start_date")
+  endDate   DateTime? @map("end_date")
+  rules     Json?
+  isActive  Boolean   @default(true) @map("is_active")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  taxDeclarations TaxDeclaration[]
+  companySettings CompanyTaxSettings[]
+
+  @@map("taxes")
+  @@unique([country, code, startDate])
+  @@index([country])
+}
+
+// Configuration PAR ENTREPRISE d'une taxe du référentiel global (Tax est
+// partagé par pays, jamais dupliqué par entreprise — même principe que
+// AccountingFramework/AccountClass) : quels comptes réels du plan
+// comptable de l'entreprise portent la TVA collectée, la TVA déductible,
+// et la TVA à décaisser/le crédit de TVA. Jamais de numéro de compte
+// codé en dur (Étape 13, même règle que AssetCategory à l'Étape 12).
+model CompanyTaxSettings {
+  id                  String   @id @default(uuid())
+  companyId           String   @map("company_id")
+  taxId               String   @map("tax_id")
+  collectedAccountId  String?  @map("collected_account_id")
+  deductibleAccountId String?  @map("deductible_account_id")
+  payableAccountId    String?  @map("payable_account_id")
+  isActive            Boolean  @default(true) @map("is_active")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  company           Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  tax               Tax      @relation(fields: [taxId], references: [id], onDelete: Restrict)
+  collectedAccount  Account? @relation("TaxCollectedAccount", fields: [collectedAccountId], references: [id], onDelete: Restrict)
+  deductibleAccount Account? @relation("TaxDeductibleAccount", fields: [deductibleAccountId], references: [id], onDelete: Restrict)
+  payableAccount    Account? @relation("TaxPayableAccount", fields: [payableAccountId], references: [id], onDelete: Restrict)
+
+  @@map("company_tax_settings")
+  @@unique([companyId, taxId])
+  @@index([companyId])
+}
+
+model TaxDeclaration {
+  id          String               @id @default(uuid())
+  companyId   String               @map("company_id")
+  taxId       String               @map("tax_id")
+  periodLabel String               @map("period_label")
+  periodStart DateTime             @map("period_start")
+  periodEnd   DateTime             @map("period_end")
+  taxableBase Decimal              @map("taxable_base") @db.Decimal(18, 2)
+  // TVA collectée (ventes), TVA déductible (achats) sur la période —
+  // calculées depuis les écritures comptables réelles (comptes de
+  // CompanyTaxSettings), jamais saisies manuellement.
+  collectedAmount  Decimal         @default(0) @map("collected_amount") @db.Decimal(18, 2)
+  deductibleAmount Decimal         @default(0) @map("deductible_amount") @db.Decimal(18, 2)
+  // netAmount = collectedAmount - deductibleAmount. Positif -> montant à
+  // payer (amountDue). Négatif -> crédit de TVA reporté (creditAmount).
+  netAmount   Decimal              @default(0) @map("net_amount") @db.Decimal(18, 2)
+  amountDue   Decimal              @map("amount_due") @db.Decimal(18, 2)
+  amountPaid  Decimal              @default(0) @map("amount_paid") @db.Decimal(18, 2)
+  creditAmount Decimal             @default(0) @map("credit_amount") @db.Decimal(18, 2)
+  status      TaxDeclarationStatus @default(DRAFT)
+  linkedEntryId String?            @map("linked_entry_id")
+  createdById   String?            @map("created_by_id")
+  validatedById String?            @map("validated_by_id")
+  validatedAt   DateTime?          @map("validated_at")
+  submittedAt DateTime?            @map("submitted_at")
+  paidAt      DateTime?            @map("paid_at")
+  dueDate     DateTime             @map("due_date")
+  createdAt   DateTime             @default(now()) @map("created_at")
+  updatedAt   DateTime             @updatedAt @map("updated_at")
+
+  company     Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  tax         Tax             @relation(fields: [taxId], references: [id])
+  linkedEntry AccountingEntry? @relation("TaxDeclarationEntry", fields: [linkedEntryId], references: [id], onDelete: Restrict)
+  createdBy   User?           @relation("TaxDeclarationCreatedBy", fields: [createdById], references: [id])
+  validatedBy User?           @relation("TaxDeclarationValidatedBy", fields: [validatedById], references: [id])
+  attachments Attachment[]
+
+  @@map("tax_declarations")
+  @@unique([companyId, taxId, periodStart, periodEnd])
+  @@index([companyId])
+  @@index([companyId, status])
+}
+
+// =====================================================================
+// BUDGETS / CONTRÔLE DE GESTION
+// =====================================================================
+
+model Budget {
+  id          String       @id @default(uuid())
+  companyId   String       @map("company_id")
+  periodId    String       @map("period_id")
+  name        String
+  description String?
+  status      BudgetStatus @default(DRAFT)
+  createdById String?      @map("created_by_id")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  company   Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  period    AccountingPeriod @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  createdBy User?            @relation("BudgetCreatedBy", fields: [createdById], references: [id])
+  lines     BudgetLine[]
+  attachments Attachment[]
+
+  @@map("budgets")
+  @@unique([companyId, periodId, name])
+  @@index([companyId])
+}
+
+model BudgetLine {
+  id            String  @id @default(uuid())
+  budgetId      String  @map("budget_id")
+  companyId     String  @map("company_id") // dénormalisé depuis Budget.companyId
+  accountId     String  @map("account_id")
+  month         Int
+  plannedAmount Decimal @map("planned_amount") @db.Decimal(18, 2)
+  // Conservée pour compatibilité du schéma existant, mais N'EST JAMAIS la
+  // source de vérité du réalisé — même règle que CashAccount.currentBalance
+  // (Étape 11) : le montant réalisé est TOUJOURS recalculé depuis les
+  // lignes d'écriture validées du compte, jamais lu depuis cette colonne.
+  actualAmount  Decimal @default(0) @map("actual_amount") @db.Decimal(18, 2)
+
+  budget  Budget  @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@map("budget_lines")
+  @@unique([budgetId, accountId, month])
+  @@index([budgetId])
+  @@index([companyId])
+}
+
+// =====================================================================
+// PIÈCES JUSTIFICATIVES
+// =====================================================================
+
+model Attachment {
+  id                String   @id @default(uuid())
+  companyId         String   @map("company_id")
+  fileName          String   @map("file_name")
+  fileUrl           String   @map("file_url")
+  mimeType          String   @map("mime_type")
+  fileSizeBytes     Int      @map("file_size_bytes")
+  sha256            String?  @map("sha256")
+  description       String?
+  category          String?
+  uploadedById      String   @map("uploaded_by_id")
+  accountingEntryId String?  @map("accounting_entry_id")
+  invoiceId         String?  @map("invoice_id")
+  fixedAssetId      String?  @map("fixed_asset_id")
+  taxDeclarationId  String?  @map("tax_declaration_id")
+  budgetId          String?  @map("budget_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  company         Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  uploadedBy      User             @relation(fields: [uploadedById], references: [id])
+  accountingEntry AccountingEntry? @relation(fields: [accountingEntryId], references: [id])
+  invoice         Invoice?         @relation(fields: [invoiceId], references: [id])
+  fixedAsset      FixedAsset?      @relation(fields: [fixedAssetId], references: [id])
+  taxDeclaration  TaxDeclaration?  @relation(fields: [taxDeclarationId], references: [id])
+  budget          Budget?          @relation(fields: [budgetId], references: [id])
+
+  @@map("attachments")
+  @@index([companyId])
+  @@index([accountingEntryId])
+  @@index([invoiceId])
+  @@index([fixedAssetId])
+  @@index([taxDeclarationId])
+  @@index([budgetId])
+}
+
+// =====================================================================
+// JOURNAL D'AUDIT
+// =====================================================================
+
+model AuditLog {
+  id         String      @id @default(uuid())
+  companyId  String?     @map("company_id")
+  userId     String?     @map("user_id")
+  action     AuditAction
+  entityType String      @map("entity_type")
+  entityId   String?     @map("entity_id")
+  oldValue   Json?       @map("old_value")
+  newValue   Json?       @map("new_value")
+  ipAddress  String?     @map("ip_address")
+  userAgent  String?     @map("user_agent")
+  createdAt  DateTime    @default(now()) @map("created_at")
+
+  // SetNull (et non Restrict/Cascade) : le journal d'audit doit survivre
+  // même dans l'hypothèse (normalement jamais atteinte grâce aux Restrict
+  // posés ailleurs) où une entreprise viendrait à être supprimée.
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  user    User?    @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+  @@index([companyId])
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}

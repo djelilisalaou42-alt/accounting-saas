@@ -1,0 +1,98 @@
+# =====================================================================
+# Configuration de référence — reverse proxy nginx pour accounting-saas
+#
+# Aucun reverse proxy n'existe dans ce projet ; nginx est proposé ici
+# comme choix simple et largement documenté pour un premier
+# déploiement — pas une dépendance imposée. Adapter les noms de
+# domaine, chemins de certificats et éventuels réglages spécifiques à
+# votre infrastructure.
+#
+# Schéma :
+#   Internet → HTTPS (nginx, ce fichier) → Frontend Next.js (:3000)
+#                                        → Backend NestJS  (:3001), sous /api/v1 et /health
+#
+# Le frontend et le backend restent deux processus Node distincts
+# (architecture déjà existante, non modifiée) — nginx route simplement
+# selon le chemin de la requête.
+# =====================================================================
+
+# --- Redirection HTTP -> HTTPS ---------------------------------------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name votre-domaine.example;
+    return 301 https://$host$request_uri;
+}
+
+# --- Serveur HTTPS principal ------------------------------------------
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name votre-domaine.example;
+
+    # Certificats TLS — à adapter (ex. Let's Encrypt / certbot).
+    ssl_certificate     /etc/letsencrypt/live/votre-domaine.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/votre-domaine.example/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Taille max de requête alignée sur ATTACHMENTS_MAX_SIZE_BYTES
+    # (10 Mo par défaut) + marge pour les autres champs du formulaire
+    # multipart — sans quoi nginx rejetterait l'upload AVANT que
+    # l'application ne puisse produire son propre message d'erreur.
+    client_max_body_size 12m;
+
+    # Health check — chemin fixe, jamais authentifié (voir backend/src/modules/health).
+    location /health {
+        proxy_pass http://127.0.0.1:3001/health;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Timeout court : un health check qui traîne doit échouer vite,
+        # pas bloquer la sonde de l'infrastructure.
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 5s;
+    }
+
+    # API backend — tout ce qui commence par /api/v1 (voir API_PREFIX).
+    location /api/v1/ {
+        proxy_pass http://127.0.0.1:3001/api/v1/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Nécessaire pour que le cookie HttpOnly du refresh token
+        # (voir auth.controller.ts) transite correctement.
+        proxy_set_header Cookie $http_cookie;
+        proxy_pass_request_headers on;
+
+        # Timeouts raisonnables — un export CSV/rapport peut prendre
+        # plus qu'une requête ordinaire, sans pour autant rester
+        # ouvert indéfiniment.
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+
+    # Tout le reste -> frontend Next.js.
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade"; # support du Hot Module Reload / websockets Next.js si utilisé
+
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+
+    # En-têtes de sécurité complémentaires à ceux déjà posés par
+    # `helmet()` côté backend (voir main.ts) — celui-ci ne couvre que
+    # les réponses de l'API, pas celles servies par nginx lui-même.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+}
