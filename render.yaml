@@ -82,5 +82,5 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - Key: NEXT_PUBLIC_API_URL
+      - key: NEXT_PUBLIC_API_URL
         value: https://accounting-saas-backend.onrender.com/api/v1
