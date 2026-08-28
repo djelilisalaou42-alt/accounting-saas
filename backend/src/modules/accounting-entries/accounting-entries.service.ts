@@ -221,7 +221,13 @@ export class AccountingEntriesService {
   // =====================================================================
 
   async validate(companyId: string, entryId: string, userId: string, meta: RequestMetadata) {
-    const entry = await this.getEntryOrThrow(companyId, entryId, { lines: true, journal: true, period: true });
+    const entry = await this.prisma.accountingEntry.findUnique({
+      where: { id: entryId },
+      include: { lines: true, journal: true, period: true },
+    });
+    if (!entry || entry.companyId !== companyId) {
+      throw new NotFoundException('Écriture comptable introuvable pour cette entreprise.');
+    }
 
     if (entry.status !== 'DRAFT') {
       throw new ConflictException(`Cette écriture est déjà ${entry.status === 'VALIDATED' ? 'validée' : 'contrepassée'}.`);
