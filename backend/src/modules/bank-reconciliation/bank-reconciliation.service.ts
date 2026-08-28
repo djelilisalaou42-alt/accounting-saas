@@ -99,8 +99,14 @@ export class BankReconciliationService {
     return { ...updated, balanced };
   }
 
-  async cancel(companyId: string, id: string, userId: string, meta: RequestMetadata) {
-    const rec = await this.getReconciliationOrThrow(companyId, id, { matches: true });
+    async cancel(companyId: string, id: string, userId: string, meta: RequestMetadata) {
+    const rec = await this.prisma.bankReconciliation.findUnique({
+      where: { id },
+      include: { matches: true },
+    });
+    if (!rec || rec.companyId !== companyId) {
+      throw new NotFoundException('Rapprochement introuvable pour cette entreprise.');
+    }
     if (rec.status === 'CANCELED') throw new ConflictException('Ce rapprochement est déjà annulé.');
 
     await this.prisma.$transaction(async (tx: any) => {
