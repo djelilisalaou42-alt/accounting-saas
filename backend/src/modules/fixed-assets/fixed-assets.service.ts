@@ -388,8 +388,11 @@ export class FixedAssetsService {
     if (period.status !== 'OPEN') throw new ForbiddenException(`L'exercice "${period.name}" n'est pas ouvert.`);
 
     const disposal = await this.prisma.$transaction(async (tx: any) => {
-      const lines: Array<{ accountId: string; side: 'DEBIT' | 'CREDIT'; amount: number; label: string }> = [];
+            const lines: Array<{ accountId: string; side: 'DEBIT' | 'CREDIT'; amount: number; label: string }> = [];
       if (accumulatedDepreciation > 0) {
+        if (!asset.depreciationAccountId) {
+          throw new BadRequestException(`Compte d'amortissement manquant sur la fiche ${asset.code} — impossible d'annuler les amortissements cumulés à la cession.`);
+        }
         lines.push({ accountId: asset.depreciationAccountId, side: 'DEBIT', amount: accumulatedDepreciation, label: `Annulation amortissements ${asset.code}` });
       }
       if (disposalPrice > 0) {
