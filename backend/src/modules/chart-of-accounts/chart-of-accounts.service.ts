@@ -110,10 +110,11 @@ export class ChartOfAccountsService {
     const existing = await this.prisma.account.findUnique({ where: { companyId_code: { companyId, code: dto.code } } });
     if (existing) throw new ConflictException(`Le code "${dto.code}" existe déjà pour cette entreprise.`);
 
-    const account = await this.prisma.account.create({
+        const account = await this.prisma.account.create({
       data: {
         companyId,
         accountClassId: dto.accountClassId,
+        frameworkId: accountClass.frameworkId,
         code: dto.code,
         label: dto.label,
         parentId: dto.parentId,
