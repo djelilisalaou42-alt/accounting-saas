@@ -61,12 +61,16 @@ export class DashboardService {
       this.getOverdueInvoices(companyId, endDate),
     ]);
 
-        const budgetTotals = {
-      planned: round2(budgetReport.summary.totalPlanned),
-      actual: round2(budgetReport.summary.totalActual),
-    };
-    const budgetVariance = round2(budgetReport.summary.totalVariance);
-    const budgetConsumptionRate = budgetReport.summary.consumptionRate;
+            const budgetList: any[] = 'budgets' in budgetReport ? (budgetReport as any).budgets : [budgetReport];
+    const budgetTotals = budgetList.reduce(
+      (acc: any, b: any) => ({
+        planned: round2(acc.planned + b.summary.totalPlanned),
+        actual: round2(acc.actual + b.summary.totalActual),
+      }),
+      { planned: 0, actual: 0 },
+    );
+    const budgetVariance = round2(budgetTotals.actual - budgetTotals.planned);
+    const budgetConsumptionRate = budgetTotals.planned !== 0 ? round2((budgetTotals.actual / budgetTotals.planned) * 100) : null;
     const summary = {
       revenue: income.totalRevenue,
       expenses: income.totalExpenses,
