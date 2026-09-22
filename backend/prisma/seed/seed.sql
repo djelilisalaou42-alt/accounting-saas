@@ -61,6 +61,19 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
+-- --- Permissions du rôle Administrateur (propre à l'entreprise démo) -----
+-- BUG corrigé : ce rôle n'a jamais reçu la moindre permission depuis sa
+-- création (contrairement à sa description "Accès complet à l'entreprise
+-- de démonstration") — l'utilisateur de démo se voyait refuser TOUTE
+-- action protégée par PermissionsGuard, découvert via le dashboard
+-- (REPORT.READ manquante) mais touchant en réalité TOUTES les permissions.
+-- Même principe que le rôle système ADMIN (seed_permissions_roles.sql) :
+-- toutes les permissions existantes, jamais une liste figée qui se
+-- périmerait à chaque nouvelle permission ajoutée par une étape future.
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT '00000000-0000-0000-0000-000000000003', id FROM permissions
+ON CONFLICT DO NOTHING;
+
 -- --- Rattachement admin <-> entreprise démo -------------------------------
 INSERT INTO user_companies (id, user_id, company_id, role_id, is_default, created_at)
 VALUES (

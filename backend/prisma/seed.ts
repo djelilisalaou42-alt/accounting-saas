@@ -73,6 +73,17 @@ async function main(): Promise<void> {
     },
   });
 
+  // BUG corrigé : ce rôle n'avait jamais reçu la moindre permission depuis
+  // sa création, malgré sa description "Accès complet à l'entreprise de
+  // démonstration" — même principe que le rôle système ADMIN
+  // (seed_permissions_roles.sql) : toutes les permissions existantes,
+  // jamais une liste figée qui se périmerait à chaque permission future.
+  const allPermissions = await prisma.permission.findMany({ select: { id: true } });
+  await prisma.rolePermission.createMany({
+    data: allPermissions.map((p: { id: string }) => ({ roleId: adminRole.id, permissionId: p.id })),
+    skipDuplicates: true,
+  });
+
   await prisma.userCompany.upsert({
     where: { id: '00000000-0000-0000-0000-000000000004' },
     update: {},
