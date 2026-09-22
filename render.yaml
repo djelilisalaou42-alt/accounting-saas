@@ -91,4 +91,8 @@ services:
       - key: NODE_ENV
         value: production
       - key: NEXT_PUBLIC_API_URL
-        value: https://accounting-saas-backend.onrender.com/api/v1
+        # Le nom "accounting-saas-backend" etait deja pris (espace de noms
+        # global Render) : le service backend a ete attribue sous
+        # accounting-saas-backend-mwm1.onrender.com — voir PRODUCTION_
+        # DEPLOYMENT.md section 5 pour ce cas de figure documente.
+        value: https://accounting-saas-backend-mwm1.onrender.com/api/v1
