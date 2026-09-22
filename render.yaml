@@ -60,6 +60,13 @@ services:
         value: https://accounting-saas-frontend.onrender.com
       - key: FRONTEND_URL
         value: https://accounting-saas-frontend.onrender.com
+      # Frontend et backend sont deployes comme 2 services separes, chacun
+      # sur son propre sous-domaine onrender.com (des "sites" distincts pour
+      # le navigateur) : le cookie de refresh doit etre SameSite=None (voir
+      # auth.controller.ts) pour survivre aux appels cross-origin du
+      # frontend, sinon toute session est perdue au premier rechargement.
+      - key: COOKIE_CROSS_SITE
+        value: "true"
       - key: API_PREFIX
         value: api/v1
       - key: ATTACHMENTS_STORAGE_PATH

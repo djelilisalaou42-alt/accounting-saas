@@ -39,17 +39,29 @@ import { CurrentUser, AuthenticatedUser } from './decorators/current-user.decora
  * la casse. La perte au rechargement est compensée par le refresh
  * silencieux au chargement de l'app (voir frontend).
  *
- * REFRESH TOKEN : posé en cookie HttpOnly + Secure + SameSite=Strict,
- * avec `path=/api/v1/auth` (jamais accessible à un autre endpoint que
- * ceux d'authentification). HttpOnly empêche tout accès depuis du
+ * REFRESH TOKEN : posé en cookie HttpOnly + Secure + SameSite=Strict par
+ * défaut, avec `path=/api/v1/auth` (jamais accessible à un autre endpoint
+ * que ceux d'authentification). HttpOnly empêche tout accès depuis du
  * JavaScript (donc immunisé contre le vol par XSS, contrairement à un
  * stockage en localStorage). Secure impose HTTPS. SameSite=Strict
  * empêche le navigateur de l'envoyer sur une requête cross-site,
- * neutralisant le CSRF pour ce cookie précis SANS nécessiter de
- * token CSRF séparé — le compromis (SameSite=Strict empêche aussi
- * l'envoi depuis un lien externe menant vers le site) est acceptable
- * ici car /auth/refresh n'est jamais appelé depuis un lien, uniquement
- * par le code JS de l'application elle-même au chargement.
+ * neutralisant le CSRF pour ce cookie précis SANS nécessiter de token CSRF
+ * séparé — valable quand frontend et backend partagent le même site (ex:
+ * reverse proxy nginx unique, voir deploy/nginx.conf.example).
+ *
+ * COOKIE_CROSS_SITE=true bascule sur SameSite=None (toujours + Secure,
+ * jamais l'un sans l'autre — un navigateur rejette un cookie None non
+ * Secure) : nécessaire dès que frontend et backend vivent sur des domaines
+ * distincts (ex: déploiement Render "Blueprint" par défaut, un service par
+ * domaine onrender.com — chaque sous-domaine onrender.com est un "site"
+ * différent pour le navigateur, la Public Suffix List le traite comme tel).
+ * Avec SameSite=Strict dans ce cas, le cookie n'est simplement JAMAIS
+ * envoyé par le navigateur sur les appels cross-origin du frontend vers le
+ * backend : le refresh silencieux échoue toujours, et tout rechargement de
+ * page déconnecte l'utilisateur. CSRF sur /auth/refresh reste maîtrisé
+ * sans SameSite grâce à CORS (origin whitelistée unique + credentials,
+ * voir main.ts) : la réponse (nouvel access token) n'est lisible que par
+ * le frontend légitime, jamais par un site tiers qui forgerait la requête.
  * =====================================================================
  */
 
@@ -57,10 +69,11 @@ const REFRESH_COOKIE_NAME = 'refresh_token';
 const REFRESH_COOKIE_PATH = '/api/v1/auth';
 
 function refreshCookieOptions() {
+  const crossSite = process.env.COOKIE_CROSS_SITE === 'true';
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict' as const,
+    secure: crossSite || process.env.NODE_ENV === 'production',
+    sameSite: crossSite ? ('none' as const) : ('strict' as const),
     path: REFRESH_COOKIE_PATH,
     maxAge: 7 * 24 * 60 * 60 * 1000, // aligné sur JWT_REFRESH_EXPIRES_IN (7j par défaut)
   };
