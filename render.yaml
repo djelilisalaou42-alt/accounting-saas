@@ -79,8 +79,13 @@ services:
     plan: free
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
+    # NEXT_PUBLIC_API_URL DOIT être un build-arg, jamais un envVar runtime :
+    # Next.js inline les variables NEXT_PUBLIC_* dans le bundle JS au moment
+    # du build (`npm run build`), il ne les relit jamais au démarrage du
+    # conteneur — voir le commentaire en tête de frontend/Dockerfile. Une
+    # variable d'environnement runtime ici serait silencieusement sans effet.
+    dockerBuildArgs:
+      NEXT_PUBLIC_API_URL: https://accounting-saas-backend.onrender.com/api/v1
     envVars:
       - key: NODE_ENV
         value: production
-      - key: NEXT_PUBLIC_API_URL
-        value: https://accounting-saas-backend.onrender.com/api/v1

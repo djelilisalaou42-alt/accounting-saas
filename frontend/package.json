@@ -33,5 +33,8 @@
     "autoprefixer": "^10.4.19",
     "eslint": "^8.57.0",
     "eslint-config-next": "^14.2.5"
+  },
+  "allowScripts": {
+    "unrs-resolver@1.12.2": true
   }
 }
