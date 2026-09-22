@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Base layer : la quasi-totalité des ~100 pages de l'app utilisent des
+ * balises HTML brutes (main, h1, table, input, button...) sans classe
+ * Tailwind — écrites avant que Tailwind ne soit configuré. Plutôt que de
+ * retoucher chaque page individuellement, on donne ici un habillage par
+ * défaut cohérent à ces balises : toute page existante en profite
+ * automatiquement, sans un seul changement de JSX.
+ */
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+  }
+
+  main {
+    @apply mx-auto max-w-5xl p-6;
+  }
+
+  h1 {
+    @apply mb-4 text-2xl font-semibold text-gray-900;
+  }
+
+  h2 {
+    @apply mb-3 mt-6 text-lg font-semibold text-gray-800;
+  }
+
+  h3 {
+    @apply mb-2 mt-4 text-base font-semibold text-gray-800;
+  }
+
+  p {
+    @apply mb-2 text-gray-700;
+  }
+
+  a {
+    @apply text-brand-600 underline-offset-2 hover:text-brand-700 hover:underline;
+  }
+
+  label {
+    @apply mb-1 mt-3 block text-sm font-medium text-gray-700;
+  }
+
+  input,
+  select,
+  textarea {
+    @apply mb-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500;
+  }
+
+  button {
+    @apply mt-2 inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  button[type='submit'] {
+    @apply border-brand-600 bg-brand-600 text-white hover:bg-brand-700;
+  }
+
+  table {
+    @apply my-4 w-full border-collapse overflow-hidden rounded-md border border-gray-200 bg-white text-sm;
+  }
+
+  th {
+    @apply border-b border-gray-200 bg-gray-100 px-3 py-2 text-left font-semibold text-gray-700;
+  }
+
+  td {
+    @apply border-b border-gray-100 px-3 py-2 text-gray-700;
+  }
+
+  ul {
+    @apply my-2 list-inside list-disc;
+  }
+
+  hr {
+    @apply my-6 border-gray-200;
+  }
+}

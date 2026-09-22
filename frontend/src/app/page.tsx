@@ -3,10 +3,12 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../lib/auth-context';
-import { CompanySelector } from '../components/layout/CompanySelector';
 
+// Sélecteur d'entreprise, infos utilisateur et déconnexion vivent
+// désormais dans la sidebar (AppShell/Sidebar), affichée sur toutes les
+// pages authentifiées — cette page ne les duplique plus.
 export default function HomePage() {
-  const { user, isLoading, isAuthenticated, logout } = useAuth();
+  const { user, isLoading, isAuthenticated } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
@@ -24,17 +26,12 @@ export default function HomePage() {
   }
 
   return (
-    <main style={{ maxWidth: 400, margin: '4rem auto' }}>
+    <main>
       <h1>Bonjour {user.firstName} {user.lastName}</h1>
-      <p>Email : {user.email}</p>
-      <p>Statut : {user.status}</p>
+      <p>Utilisez le menu à gauche pour accéder aux différents modules.</p>
       <p>
-        <CompanySelector />
+        <a href="/accounting/dashboard">Aller au tableau de bord →</a>
       </p>
-      <p>
-        <a href="/companies">Gérer mes entreprises</a>
-      </p>
-      <button onClick={() => logout()}>Se déconnecter</button>
     </main>
   );
 }
